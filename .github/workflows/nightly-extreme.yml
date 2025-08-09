@@ -1,0 +1,86 @@
+name: Nightly Extreme Build
+
+on:
+  schedule:
+    # Run at 2:00 AM UTC every day
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+  push:
+    branches:
+      - vic/extreme
+
+jobs:
+  build-mac:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Set nightly channel
+        run: echo "nightly" > crates/zed/RELEASE_CHANNEL
+
+      - name: Build bundle
+        run: |
+          # Build without code signing for open source
+          export MACOS_CERTIFICATE=""
+          export MACOS_CERTIFICATE_PASSWORD=""
+          ./script/bundle-mac --release --no-sign
+        env:
+          ZED_BUNDLE_NAME: "Zed Extreme"
+
+      - name: Create DMG
+        run: |
+          # Find the built app
+          APP_PATH="target/release/Zed Extreme.app"
+          if [ ! -d "$APP_PATH" ]; then
+            APP_PATH="target/release/Zed.app"
+          fi
+          
+          # Create a simple DMG
+          mkdir -p dmg_source
+          cp -R "$APP_PATH" dmg_source/
+          ln -s /Applications dmg_source/Applications
+          
+          hdiutil create -volname "Zed Extreme" -srcfolder dmg_source -ov -format UDZO Zed-Extreme.dmg
+          
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-extreme-macos
+          path: Zed-Extreme.dmg
+
+  release:
+    name: Create Release
+    needs: build-mac
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-extreme-macos
+
+      - name: Update nightly release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: nightly
+          name: Nightly Build
+          body: |
+            Automated nightly build of Zed Extreme.
+            
+            **Note: This is a personal fork, don't use.**
+            
+            Built from commit: ${{ github.sha }}
+          draft: false
+          prerelease: true
+          files: Zed-Extreme.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
