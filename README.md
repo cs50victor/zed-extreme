@@ -1,6 +1,6 @@
 # Zed Extreme
 
-[![Zed Extreme](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/vic8or/zed-extreme/main/assets/badge/v0-extreme.json)](https://github.com/vic8or/zed-extreme)
+[![Zed Extreme](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cs50victor/zed-extreme/refs/heads/vic/extreme/assets/badge/v0-extreme.json)](https://github.com/cs50victor/zed-extreme)
 
 An opinionated personal fork of [Zed](https://github.com/zed-industries/zed) featuring experimental capabilities not currently on the official roadmap. This fork explores an  approach to achieving "code at the speed of thought."
 
