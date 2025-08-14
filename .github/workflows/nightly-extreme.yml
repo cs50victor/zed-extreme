@@ -11,16 +11,15 @@ jobs:
     name: Build macOS
     runs-on: macos-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-      
       - name: Allow long git paths
         run: git config --global core.longpaths true
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Set nightly channel
