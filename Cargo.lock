@@ -7,20 +7,23 @@ name = "acp_thread"
 version = "0.1.0"
 dependencies = [
  "action_log",
+ "agent",
  "agent-client-protocol",
  "anyhow",
  "buffer_diff",
+ "collections",
  "editor",
  "env_logger 0.11.8",
+ "file_icons",
  "futures 0.3.31",
  "gpui",
  "indoc",
  "itertools 0.14.0",
  "language",
- "language_model",
  "markdown",
  "parking_lot",
  "project",
+ "prompt_store",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -31,6 +34,8 @@ dependencies = [
  "ui",
  "url",
  "util",
+ "uuid",
+ "watch",
  "workspace-hack",
 ]
 
@@ -390,6 +395,7 @@ dependencies = [
  "ui",
  "ui_input",
  "unindent",
+ "url",
  "urlencoding",
  "util",
  "uuid",
@@ -6445,6 +6451,7 @@ dependencies = [
  "log",
  "parking_lot",
  "pretty_assertions",
+ "rand 0.8.5",
  "regex",
  "rope",
  "schemars",
@@ -11149,14 +11156,13 @@ dependencies = [
  "ai_onboarding",
  "anyhow",
  "client",
- "command_palette_hooks",
  "component",
  "db",
  "documented",
  "editor",
- "feature_flags",
  "fs",
  "fuzzy",
+ "git",
  "gpui",
  "itertools 0.14.0",
  "language",
@@ -11168,6 +11174,7 @@ dependencies = [
  "schemars",
  "serde",
  "settings",
+ "telemetry",
  "theme",
  "ui",
  "util",
@@ -18884,33 +18891,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53a85b86a771b1c87058196170769dd264f66c0782acf1ae6cc51bfd64b39082"
 
 [[package]]
-name = "welcome"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "client",
- "component",
- "db",
- "documented",
- "editor",
- "fuzzy",
- "gpui",
- "install_cli",
- "language",
- "picker",
- "project",
- "serde",
- "settings",
- "telemetry",
- "ui",
- "util",
- "vim_mode_setting",
- "workspace",
- "workspace-hack",
- "zed_actions",
-]
-
-[[package]]
 name = "which"
 version = "4.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -20524,7 +20504,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.200.0"
+version = "0.201.0"
 dependencies = [
  "activity_indicator",
  "agent",
@@ -20664,7 +20644,6 @@ dependencies = [
  "watch",
  "web_search",
  "web_search_providers",
- "welcome",
  "windows 0.61.1",
  "winresource",
  "workspace",
@@ -20688,7 +20667,7 @@ dependencies = [
 
 [[package]]
 name = "zed_emmet"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "zed_extension_api 0.1.0",
 ]
