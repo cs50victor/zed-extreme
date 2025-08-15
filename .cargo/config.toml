@@ -23,5 +23,11 @@ rustflags = [
     "link-arg=-fuse-ld=lld",
 ]
 
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-ObjC"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-ObjC"]
+
 [env]
 MACOSX_DEPLOYMENT_TARGET = "10.15.7"

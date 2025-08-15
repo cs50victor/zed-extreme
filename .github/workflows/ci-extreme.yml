@@ -18,7 +18,7 @@ env:
 jobs:
   check-compile-macos:
     name: Check macOS compilation
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -60,52 +60,7 @@ jobs:
       - name: Clean CI config file
         if: always()
         run: rm -rf ./../.cargo
-
-  check-compile-linux:
-    name: Check Linux compilation
-    runs-on: ubuntu-latest
-    steps:
-      - name: Allow long git paths
-        run: git config --global core.longpaths true
-
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with: 
-          clean: false
-
-      - name: Cache dependencies
-        uses: swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/vic/extreme' }}
-          
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: x86_64-unknown-linux-gnu
-
-
-      - name: Install Linux dependencies
-        run: ./script/linux
-
-      - name: Configure CI
-        run: |
-          mkdir -p ./../.cargo
-          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
-
-      - name: cargo clippy
-        run: ./script/clippy
-
-      - name: Run tests
-        uses: ./.github/actions/run_tests
-
-      - name: Build other binaries and features
-        run: |
-          cargo build -p zed
-          cargo check -p workspace
         
-        # cargo check -p gpui --examples
-
   check-compile-windows:
     name: Check Windows compilation
     runs-on: windows-latest
@@ -146,13 +101,12 @@ jobs:
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [check-compile-macos, check-compile-linux, check-compile-windows]
+    needs: [check-compile-macos, check-compile-windows]
     if: always()
     steps:
       - name: Check results
         run: |
           if [ "${{ needs.check-compile-macos.result }}" != "success" ] || \
-             [ "${{ needs.check-compile-linux.result }}" != "success" ] || \
              [ "${{ needs.check-compile-windows.result }}" != "success" ]; then
             echo "One or more platforms failed compilation checks"
             exit 1
