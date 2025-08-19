@@ -280,7 +280,7 @@ impl ProjectDiff {
     fn button_states(&self, cx: &App) -> ButtonStates {
         let editor = self.editor.read(cx);
         let snapshot = self.multibuffer.read(cx).snapshot(cx);
-        let prev_next = snapshot.diff_hunks().skip(1).next().is_some();
+        let prev_next = snapshot.diff_hunks().nth(1).is_some();
         let mut selection = true;
 
         let mut ranges = editor
@@ -363,10 +363,10 @@ impl ProjectDiff {
             }
             _ => {}
         }
-        if editor.focus_handle(cx).contains_focused(window, cx) {
-            if self.multibuffer.read(cx).is_empty() {
-                self.focus_handle.focus(window)
-            }
+        if editor.focus_handle(cx).contains_focused(window, cx)
+            && self.multibuffer.read(cx).is_empty()
+        {
+            self.focus_handle.focus(window)
         }
     }
 
