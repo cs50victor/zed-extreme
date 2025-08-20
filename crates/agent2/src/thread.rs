@@ -1,4 +1,9 @@
-use crate::{ContextServerRegistry, SystemPromptTemplate, Template, Templates};
+use crate::{
+    ContextServerRegistry, CopyPathTool, CreateDirectoryTool, DbLanguageModel, DbThread,
+    DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool, FindPathTool, GrepTool,
+    ListDirectoryTool, MovePathTool, NowTool, OpenTool, ReadFileTool, SystemPromptTemplate,
+    Template, Templates, TerminalTool, ThinkingTool, WebSearchTool,
+};
 use acp_thread::{MentionUri, UserMessageId};
 use action_log::ActionLog;
 use agent::thread::{DetailedSummaryState, GitState, ProjectSnapshot, WorktreeSnapshot};
@@ -8,7 +13,7 @@ use anyhow::{Context as _, Result, anyhow};
 use assistant_tool::adapt_schema_to_format;
 use chrono::{DateTime, Utc};
 use cloud_llm_client::{CompletionIntent, CompletionRequestStatus};
-use collections::IndexMap;
+use collections::{HashMap, IndexMap};
 use fs::Fs;
 use futures::{
     FutureExt,
@@ -17,13 +22,13 @@ use futures::{
     stream::FuturesUnordered,
 };
 use git::repository::DiffType;
-use gpui::{App, AsyncApp, Context, Entity, SharedString, Task, WeakEntity};
+use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Task, WeakEntity};
 use language_model::{
-    LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelImage,
-    LanguageModelProviderId, LanguageModelRequest, LanguageModelRequestMessage,
-    LanguageModelRequestTool, LanguageModelToolResult, LanguageModelToolResultContent,
-    LanguageModelToolSchemaFormat, LanguageModelToolUse, LanguageModelToolUseId, Role, StopReason,
-    TokenUsage,
+    LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent, LanguageModelExt,
+    LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry, LanguageModelRequest,
+    LanguageModelRequestMessage, LanguageModelRequestTool, LanguageModelToolResult,
+    LanguageModelToolResultContent, LanguageModelToolSchemaFormat, LanguageModelToolUse,
+    LanguageModelToolUseId, Role, SelectedModel, StopReason, TokenUsage,
 };
 use project::{
     Project,
@@ -476,6 +481,7 @@ pub enum ThreadEvent {
     ToolCall(acp::ToolCall),
     ToolCallUpdate(acp_thread::ToolCallUpdate),
     ToolCallAuthorization(ToolCallAuthorization),
+    TokenUsageUpdate(acp_thread::TokenUsage),
     TitleUpdate(SharedString),
     Retry(acp_thread::RetryStatus),
     Stop(acp::StopReason),
@@ -504,8 +510,7 @@ pub struct Thread {
     pending_message: Option<AgentMessage>,
     tools: BTreeMap<SharedString, Arc<dyn AnyAgentTool>>,
     tool_use_limit_reached: bool,
-    #[allow(unused)]
-    request_token_usage: Vec<TokenUsage>,
+    request_token_usage: HashMap<UserMessageId, language_model::TokenUsage>,
     #[allow(unused)]
     cumulative_token_usage: TokenUsage,
     #[allow(unused)]
@@ -516,8 +521,8 @@ pub struct Thread {
     templates: Arc<Templates>,
     model: Option<Arc<dyn LanguageModel>>,
     summarization_model: Option<Arc<dyn LanguageModel>>,
-    project: Entity<Project>,
-    action_log: Entity<ActionLog>,
+    pub(crate) project: Entity<Project>,
+    pub(crate) action_log: Entity<ActionLog>,
 }
 
 impl Thread {
@@ -528,7 +533,6 @@ impl Thread {
         action_log: Entity<ActionLog>,
         templates: Arc<Templates>,
         model: Option<Arc<dyn LanguageModel>>,
-        summarization_model: Option<Arc<dyn LanguageModel>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let profile_id = AgentSettings::get_global(cx).default_profile.clone();
@@ -544,7 +548,7 @@ impl Thread {
             pending_message: None,
             tools: BTreeMap::default(),
             tool_use_limit_reached: false,
-            request_token_usage: Vec::new(),
+            request_token_usage: HashMap::default(),
             cumulative_token_usage: TokenUsage::default(),
             initial_project_snapshot: {
                 let project_snapshot = Self::project_snapshot(project.clone(), cx);
@@ -557,7 +561,7 @@ impl Thread {
             project_context,
             templates,
             model,
-            summarization_model,
+            summarization_model: None,
             project,
             action_log,
         }
@@ -650,6 +654,88 @@ impl Thread {
                 ..Default::default()
             },
         );
+    }
+
+    pub fn from_db(
+        id: acp::SessionId,
+        db_thread: DbThread,
+        project: Entity<Project>,
+        project_context: Entity<ProjectContext>,
+        context_server_registry: Entity<ContextServerRegistry>,
+        action_log: Entity<ActionLog>,
+        templates: Arc<Templates>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let profile_id = db_thread
+            .profile
+            .unwrap_or_else(|| AgentSettings::get_global(cx).default_profile.clone());
+        let model = LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+            db_thread
+                .model
+                .and_then(|model| {
+                    let model = SelectedModel {
+                        provider: model.provider.clone().into(),
+                        model: model.model.clone().into(),
+                    };
+                    registry.select_model(&model, cx)
+                })
+                .or_else(|| registry.default_model())
+                .map(|model| model.model)
+        });
+
+        Self {
+            id,
+            prompt_id: PromptId::new(),
+            title: if db_thread.title.is_empty() {
+                None
+            } else {
+                Some(db_thread.title.clone())
+            },
+            summary: db_thread.summary,
+            messages: db_thread.messages,
+            completion_mode: db_thread.completion_mode.unwrap_or_default(),
+            running_turn: None,
+            pending_message: None,
+            tools: BTreeMap::default(),
+            tool_use_limit_reached: false,
+            request_token_usage: db_thread.request_token_usage.clone(),
+            cumulative_token_usage: db_thread.cumulative_token_usage,
+            initial_project_snapshot: Task::ready(db_thread.initial_project_snapshot).shared(),
+            context_server_registry,
+            profile_id,
+            project_context,
+            templates,
+            model,
+            summarization_model: None,
+            project,
+            action_log,
+            updated_at: db_thread.updated_at,
+        }
+    }
+
+    pub fn to_db(&self, cx: &App) -> Task<DbThread> {
+        let initial_project_snapshot = self.initial_project_snapshot.clone();
+        let mut thread = DbThread {
+            title: self.title.clone().unwrap_or_default(),
+            messages: self.messages.clone(),
+            updated_at: self.updated_at,
+            summary: self.summary.clone(),
+            initial_project_snapshot: None,
+            cumulative_token_usage: self.cumulative_token_usage,
+            request_token_usage: self.request_token_usage.clone(),
+            model: self.model.as_ref().map(|model| DbLanguageModel {
+                provider: model.provider_id().to_string(),
+                model: model.name().0.to_string(),
+            }),
+            completion_mode: Some(self.completion_mode),
+            profile: Some(self.profile_id.clone()),
+        };
+
+        cx.background_spawn(async move {
+            let initial_project_snapshot = initial_project_snapshot.await;
+            thread.initial_project_snapshot = initial_project_snapshot;
+            thread
+        })
     }
 
     /// Create a snapshot of the current project state including git information and unsaved buffers.
@@ -816,6 +902,32 @@ impl Thread {
         }
     }
 
+    pub fn add_default_tools(&mut self, cx: &mut Context<Self>) {
+        let language_registry = self.project.read(cx).languages().clone();
+        self.add_tool(CopyPathTool::new(self.project.clone()));
+        self.add_tool(CreateDirectoryTool::new(self.project.clone()));
+        self.add_tool(DeletePathTool::new(
+            self.project.clone(),
+            self.action_log.clone(),
+        ));
+        self.add_tool(DiagnosticsTool::new(self.project.clone()));
+        self.add_tool(EditFileTool::new(cx.weak_entity(), language_registry));
+        self.add_tool(FetchTool::new(self.project.read(cx).client().http_client()));
+        self.add_tool(FindPathTool::new(self.project.clone()));
+        self.add_tool(GrepTool::new(self.project.clone()));
+        self.add_tool(ListDirectoryTool::new(self.project.clone()));
+        self.add_tool(MovePathTool::new(self.project.clone()));
+        self.add_tool(NowTool);
+        self.add_tool(OpenTool::new(self.project.clone()));
+        self.add_tool(ReadFileTool::new(
+            self.project.clone(),
+            self.action_log.clone(),
+        ));
+        self.add_tool(TerminalTool::new(self.project.clone(), cx));
+        self.add_tool(ThinkingTool);
+        self.add_tool(WebSearchTool); // TODO: Enable this only if it's a zed model.
+    }
+
     pub fn add_tool(&mut self, tool: impl AgentTool) {
         self.tools.insert(tool.name(), tool.erase());
     }
@@ -839,6 +951,15 @@ impl Thread {
         self.flush_pending_message(cx);
     }
 
+    pub fn update_token_usage(&mut self, update: language_model::TokenUsage) {
+        let Some(last_user_message) = self.last_user_message() else {
+            return;
+        };
+
+        self.request_token_usage
+            .insert(last_user_message.id.clone(), update);
+    }
+
     pub fn truncate(&mut self, message_id: UserMessageId, cx: &mut Context<Self>) -> Result<()> {
         self.cancel(cx);
         let Some(position) = self.messages.iter().position(
@@ -846,9 +967,29 @@ impl Thread {
         ) else {
             return Err(anyhow!("Message not found"));
         };
-        self.messages.truncate(position);
+
+        for message in self.messages.drain(position..) {
+            match message {
+                Message::User(message) => {
+                    self.request_token_usage.remove(&message.id);
+                }
+                Message::Agent(_) | Message::Resume => {}
+            }
+        }
+
         cx.notify();
         Ok(())
+    }
+
+    pub fn latest_token_usage(&self) -> Option<acp_thread::TokenUsage> {
+        let last_user_message = self.last_user_message()?;
+        let tokens = self.request_token_usage.get(&last_user_message.id)?;
+        let model = self.model.clone()?;
+
+        Some(acp_thread::TokenUsage {
+            max_tokens: model.max_token_count_for_mode(self.completion_mode.into()),
+            used_tokens: tokens.total_tokens(),
+        })
     }
 
     pub fn resume(
@@ -1035,6 +1176,21 @@ impl Thread {
                         CompletionRequestStatus::ToolUseLimitReached,
                     )) => {
                         *tool_use_limit_reached = true;
+                    }
+                    Ok(LanguageModelCompletionEvent::UsageUpdate(token_usage)) => {
+                        let usage = acp_thread::TokenUsage {
+                            max_tokens: model.max_token_count_for_mode(
+                                request
+                                    .mode
+                                    .unwrap_or(cloud_llm_client::CompletionMode::Normal),
+                            ),
+                            used_tokens: token_usage.total_tokens(),
+                        };
+
+                        this.update(cx, |this, _cx| this.update_token_usage(token_usage))
+                            .ok();
+
+                        event_stream.send_token_usage_update(usage);
                     }
                     Ok(LanguageModelCompletionEvent::Stop(StopReason::Refusal)) => {
                         *refusal = true;
@@ -1244,7 +1400,7 @@ impl Thread {
 
         // Ensure the last message ends in the current tool use
         let last_message = self.pending_message();
-        let push_new_tool_use = last_message.content.last_mut().map_or(true, |content| {
+        let push_new_tool_use = last_message.content.last_mut().is_none_or(|content| {
             if let AgentMessageContent::ToolUse(last_tool_use) = content {
                 if last_tool_use.id == tool_use.id {
                     *last_tool_use = tool_use.clone();
@@ -1296,7 +1452,7 @@ impl Thread {
             status: Some(acp::ToolCallStatus::InProgress),
             ..Default::default()
         });
-        let supports_images = self.model().map_or(false, |model| model.supports_images());
+        let supports_images = self.model().is_some_and(|model| model.supports_images());
         let tool_result = tool.run(tool_use.input, tool_event_stream, cx);
         log::info!("Running tool {}", tool_use.name);
         Some(cx.foreground_executor().spawn(async move {
@@ -1419,6 +1575,16 @@ impl Thread {
                 cx.notify();
             })
         }))
+    }
+    fn last_user_message(&self) -> Option<&UserMessage> {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::User(user_message) => Some(user_message),
+                Message::Agent(_) => None,
+                Message::Resume => None,
+            })
     }
 
     fn pending_message(&mut self) -> &mut AgentMessage {
@@ -1732,8 +1898,8 @@ where
     fn initial_title(&self, input: Result<Self::Input, serde_json::Value>) -> SharedString;
 
     /// Returns the JSON schema that describes the tool's input.
-    fn input_schema(&self) -> Schema {
-        schemars::schema_for!(Self::Input)
+    fn input_schema(&self, format: LanguageModelToolSchemaFormat) -> Schema {
+        crate::tool_schema::root_schema_for::<Self::Input>(format)
     }
 
     /// Some tools rely on a provider for the underlying billing or other reasons.
@@ -1819,7 +1985,7 @@ where
     }
 
     fn input_schema(&self, format: LanguageModelToolSchemaFormat) -> Result<serde_json::Value> {
-        let mut json = serde_json::to_value(self.0.input_schema())?;
+        let mut json = serde_json::to_value(self.0.input_schema(format))?;
         adapt_schema_to_format(&mut json, format)?;
         Ok(json)
     }
@@ -1936,6 +2102,12 @@ impl ThreadEventStream {
                 }
                 .into(),
             )))
+            .ok();
+    }
+
+    fn send_token_usage_update(&self, usage: acp_thread::TokenUsage) {
+        self.0
+            .unbounded_send(Ok(ThreadEvent::TokenUsageUpdate(usage)))
             .ok();
     }
 

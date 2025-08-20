@@ -789,7 +789,7 @@ impl ContextStore {
         let fs = self.fs.clone();
         cx.spawn(async move |this, cx| {
             pub static ZED_STATELESS: LazyLock<bool> =
-                LazyLock::new(|| std::env::var("ZED_STATELESS").map_or(false, |v| !v.is_empty()));
+                LazyLock::new(|| std::env::var("ZED_STATELESS").is_ok_and(|v| !v.is_empty()));
             if *ZED_STATELESS {
                 return Ok(());
             }
@@ -905,7 +905,7 @@ impl ContextStore {
                     .into_iter()
                     .filter(assistant_slash_commands::acceptable_prompt)
                     .map(|prompt| {
-                        log::info!("registering context server command: {:?}", prompt.name);
+                        log::debug!("registering context server command: {:?}", prompt.name);
                         slash_command_working_set.insert(Arc::new(
                             assistant_slash_commands::ContextServerSlashCommand::new(
                                 context_server_store.clone(),
