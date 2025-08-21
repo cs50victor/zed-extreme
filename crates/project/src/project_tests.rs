@@ -1818,7 +1818,7 @@ async fn test_restarting_server_with_diagnostics_published(cx: &mut gpui::TestAp
             buffer
                 .snapshot()
                 .diagnostics_in_range::<_, usize>(0..1, false)
-                .map(|entry| entry.diagnostic.message.clone())
+                .map(|entry| entry.diagnostic.message)
                 .collect::<Vec<_>>(),
             ["the message".to_string()]
         );
@@ -1844,7 +1844,7 @@ async fn test_restarting_server_with_diagnostics_published(cx: &mut gpui::TestAp
             buffer
                 .snapshot()
                 .diagnostics_in_range::<_, usize>(0..1, false)
-                .map(|entry| entry.diagnostic.message.clone())
+                .map(|entry| entry.diagnostic.message)
                 .collect::<Vec<_>>(),
             Vec::<String>::new(),
         );
@@ -3005,6 +3005,7 @@ async fn test_definition(cx: &mut gpui::TestAppContext) {
     let mut definitions = project
         .update(cx, |project, cx| project.definitions(&buffer, 22, cx))
         .await
+        .unwrap()
         .unwrap();
 
     // Assert no new language server started
@@ -3519,7 +3520,7 @@ async fn test_apply_code_actions_with_commands(cx: &mut gpui::TestAppContext) {
         .next()
         .await;
 
-    let action = actions.await.unwrap()[0].clone();
+    let action = actions.await.unwrap().unwrap()[0].clone();
     let apply = project.update(cx, |project, cx| {
         project.apply_code_action(buffer.clone(), action, true, cx)
     });
@@ -3712,7 +3713,7 @@ async fn test_save_file_spawns_language_server(cx: &mut gpui::TestAppContext) {
 async fn test_file_changes_multiple_times_on_disk(cx: &mut gpui::TestAppContext) {
     init_test(cx);
 
-    let fs = FakeFs::new(cx.executor().clone());
+    let fs = FakeFs::new(cx.executor());
     fs.insert_tree(
         path!("/dir"),
         json!({
@@ -3767,7 +3768,7 @@ async fn test_file_changes_multiple_times_on_disk(cx: &mut gpui::TestAppContext)
 async fn test_edit_buffer_while_it_reloads(cx: &mut gpui::TestAppContext) {
     init_test(cx);
 
-    let fs = FakeFs::new(cx.executor().clone());
+    let fs = FakeFs::new(cx.executor());
     fs.insert_tree(
         path!("/dir"),
         json!({
@@ -4123,7 +4124,7 @@ async fn test_buffer_identity_across_renames(cx: &mut gpui::TestAppContext) {
         })
         .unwrap()
         .await
-        .to_included()
+        .into_included()
         .unwrap();
     cx.executor().run_until_parked();
 
@@ -5897,7 +5898,7 @@ async fn test_search_with_unicode(cx: &mut gpui::TestAppContext) {
 async fn test_create_entry(cx: &mut gpui::TestAppContext) {
     init_test(cx);
 
-    let fs = FakeFs::new(cx.executor().clone());
+    let fs = FakeFs::new(cx.executor());
     fs.insert_tree(
         "/one/two",
         json!({
@@ -5918,7 +5919,7 @@ async fn test_create_entry(cx: &mut gpui::TestAppContext) {
         })
         .await
         .unwrap()
-        .to_included()
+        .into_included()
         .unwrap();
 
     // Can't create paths outside the project
@@ -6110,6 +6111,7 @@ async fn test_multiple_language_server_hovers(cx: &mut gpui::TestAppContext) {
         hover_task
             .await
             .into_iter()
+            .flatten()
             .map(|hover| hover.contents.iter().map(|block| &block.text).join("|"))
             .sorted()
             .collect::<Vec<_>>(),
@@ -6183,6 +6185,7 @@ async fn test_hovers_with_empty_parts(cx: &mut gpui::TestAppContext) {
         hover_task
             .await
             .into_iter()
+            .flatten()
             .map(|hover| hover.contents.iter().map(|block| &block.text).join("|"))
             .sorted()
             .collect::<Vec<_>>(),
@@ -6261,7 +6264,7 @@ async fn test_code_actions_only_kinds(cx: &mut gpui::TestAppContext) {
         .await
         .expect("The code action request should have been triggered");
 
-    let code_actions = code_actions_task.await.unwrap();
+    let code_actions = code_actions_task.await.unwrap().unwrap();
     assert_eq!(code_actions.len(), 1);
     assert_eq!(
         code_actions[0].lsp_action.action_kind(),
@@ -6419,6 +6422,7 @@ async fn test_multiple_language_server_actions(cx: &mut gpui::TestAppContext) {
         vec!["TailwindServer code action", "TypeScriptServer code action"],
         code_actions_task
             .await
+            .unwrap()
             .unwrap()
             .into_iter()
             .map(|code_action| code_action.lsp_action.title().to_owned())
