@@ -18,7 +18,7 @@ env:
 jobs:
   check-compile-macos:
     name: Check macOS compilation
-    runs-on: macos-latest
+    runs-on: macos-latest-xlarge
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -41,83 +41,20 @@ jobs:
           cargo update --locked --workspace
 
       # TODO: Fix all build issues
-      - name: All steps commented out
-        run: echo "TODO - all steps commented out for now"
+      # - name: All steps commented out
+      #   run: echo "TODO - all steps commented out for now"
         
       # - name: cargo clippy
       #   run: ./script/clippy
-      #
-      # - name: Run tests
-      #   uses: ./.github/actions/run_tests
-      #
-      # - name: Build collab
-      #   run: cargo build -p collab
-      #
-      # - name: Build other binaries and features
-      #   run: |
-      #     cargo build --workspace --bins --all-features
-      #     cargo check -p gpui --features "macos-blade"
-      #     cargo check -p workspace
-      #     cargo build -p remote_server
+      
+      - name: Build
+        run: cargo build
 
+      - name: Run tests
+        uses: ./.github/actions/run_tests
+        
       # Since the macOS runners are stateful, so we need to remove the config file to prevent potential bug.
       - name: Clean CI config file
         if: always()
         run: rm -rf ./../.cargo
         
-  check-compile-windows:
-    name: Check Windows compilation
-    runs-on: windows-latest
-    steps:
-      - name: Allow long git paths
-        run: git config --global core.longpaths true
-
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          clean: false
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-          targets: x86_64-pc-windows-msvc
-
-      - name: Configure CI
-        run: |
-          New-Item -ItemType Directory -Path "./../.cargo" -Force
-          Copy-Item -Path "./.cargo/ci-config.toml" -Destination "./../.cargo/config.toml"
-
-      # TODO: Fix all build issues
-      - name: All steps commented out
-        run: echo "TODO - all steps commented out for now"
-        
-      # - name: cargo clippy  
-      #   run: |
-      #     .\script\clippy.ps1
-      #
-      # - name: Run tests
-      #   uses: ./.github/actions/run_tests_windows
-      #
-      # - name: Build Zed
-      #   run: cargo build
-
-      - name: Clean CI config file
-        if: always()
-        run: Remove-Item -Recurse -Path "./../.cargo" -Force -ErrorAction SilentlyContinue
-
-  summary:
-    name: CI Summary
-    runs-on: ubuntu-latest
-    needs: [check-compile-macos, check-compile-windows]
-    if: always()
-    steps:
-      - name: Check results
-        run: |
-          if [ "${{ needs.check-compile-macos.result }}" != "success" ] || \
-             [ "${{ needs.check-compile-windows.result }}" != "success" ]; then
-            echo "One or more platforms failed compilation checks"
-            exit 1
-          else
-            echo "All platforms compiled successfully"
-          fi

@@ -377,8 +377,8 @@ fn spawn_claude(
     mcp_config_path: &Path,
     root_dir: &Path,
 ) -> Result<Child> {
-    let child = util::command::new_smol_command(&command.path)
-        .args([
+    let mut cmd = util::command::new_smol_command(&command.path);
+    cmd.args([
             "--input-format",
             "stream-json",
             "--output-format",
@@ -408,14 +408,17 @@ fn spawn_claude(
         })
         .args(command.args.iter().map(|arg| arg.as_str()))
         .envs(command.env.iter().flatten())
-        .env("ANTHROPIC_API_KEY", api_key.key)
         .current_dir(root_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
 
+    // if !api_key.key.is_empty() {
+    //     cmd.env("ANTHROPIC_API_KEY", api_key.key);
+    // }
+
+    let child = cmd.spawn()?;
     Ok(child)
 }
 
