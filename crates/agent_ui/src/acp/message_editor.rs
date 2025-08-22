@@ -11,7 +11,7 @@ use assistant_slash_commands::codeblock_fence_for_path;
 use collections::{HashMap, HashSet};
 use editor::{
     Addon, Anchor, AnchorRangeExt, ContextMenuOptions, ContextMenuPlacement, Editor, EditorElement,
-    EditorEvent, EditorMode, EditorStyle, ExcerptId, FoldPlaceholder, MultiBuffer,
+    EditorEvent, EditorMode, EditorSnapshot, EditorStyle, ExcerptId, FoldPlaceholder, MultiBuffer,
     SemanticsProvider, ToOffset,
     actions::Paste,
     display_map::{Crease, CreaseId, FoldId},
@@ -87,6 +87,7 @@ impl MessageEditor {
         project: Entity<Project>,
         history_store: Entity<HistoryStore>,
         prompt_store: Option<Entity<PromptStore>>,
+        prompt_capabilities: Rc<Cell<acp::PromptCapabilities>>,
         placeholder: impl Into<Arc<str>>,
         prevent_slash_commands: bool,
         mode: EditorMode,
@@ -100,7 +101,6 @@ impl MessageEditor {
             },
             None,
         );
-        let prompt_capabilities = Rc::new(Cell::new(acp::PromptCapabilities::default()));
         let completion_provider = ContextPickerCompletionProvider::new(
             cx.weak_entity(),
             workspace.clone(),
@@ -140,11 +140,11 @@ impl MessageEditor {
         .detach();
 
         let mut subscriptions = Vec::new();
-        if prevent_slash_commands {
-            subscriptions.push(cx.subscribe_in(&editor, window, {
-                let semantics_provider = semantics_provider.clone();
-                move |this, editor, event, window, cx| {
-                    if let EditorEvent::Edited { .. } = event {
+        subscriptions.push(cx.subscribe_in(&editor, window, {
+            let semantics_provider = semantics_provider.clone();
+            move |this, editor, event, window, cx| {
+                if let EditorEvent::Edited { .. } = event {
+                    if prevent_slash_commands {
                         this.highlight_slash_command(
                             semantics_provider.clone(),
                             editor.clone(),
@@ -152,9 +152,12 @@ impl MessageEditor {
                             cx,
                         );
                     }
+                    let snapshot = editor.update(cx, |editor, cx| editor.snapshot(window, cx));
+                    this.mention_set.remove_invalid(snapshot);
+                    cx.notify();
                 }
-            }));
-        }
+            }
+        }));
 
         Self {
             editor,
@@ -198,10 +201,6 @@ impl MessageEditor {
             cx,
         )
         .detach();
-    }
-
-    pub fn set_prompt_capabilities(&mut self, capabilities: acp::PromptCapabilities) {
-        self.prompt_capabilities.set(capabilities);
     }
 
     #[cfg(test)]
@@ -709,9 +708,13 @@ impl MessageEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<(Vec<acp::ContentBlock>, Vec<Entity<Buffer>>)>> {
-        let contents =
-            self.mention_set
-                .contents(&self.project, self.prompt_store.as_ref(), window, cx);
+        let contents = self.mention_set.contents(
+            &self.project,
+            self.prompt_store.as_ref(),
+            &self.prompt_capabilities.get(),
+            window,
+            cx,
+        );
         let editor = self.editor.clone();
         let prevent_slash_commands = self.prevent_slash_commands;
 
@@ -726,11 +729,6 @@ impl MessageEditor {
                 editor.display_map.update(cx, |map, cx| {
                     let snapshot = map.snapshot(cx);
                     for (crease_id, crease) in snapshot.crease_snapshot.creases() {
-                        // Skip creases that have been edited out of the message buffer.
-                        if !crease.range().start.is_valid(&snapshot.buffer_snapshot) {
-                            continue;
-                        }
-
                         let Some(mention) = contents.get(&crease_id) else {
                             continue;
                         };
@@ -774,6 +772,17 @@ impl MessageEditor {
                                         .abs_path
                                         .as_ref()
                                         .map(|path| format!("file://{}", path.display())),
+                                })
+                            }
+                            Mention::UriOnly(uri) => {
+                                acp::ContentBlock::ResourceLink(acp::ResourceLink {
+                                    name: uri.name(),
+                                    uri: uri.to_uri().to_string(),
+                                    annotations: None,
+                                    description: None,
+                                    mime_type: None,
+                                    size: None,
+                                    title: None,
                                 })
                             }
                         };
@@ -1082,15 +1091,21 @@ impl MessageEditor {
                         mentions.push((start..end, mention_uri, resource.text));
                     }
                 }
+                acp::ContentBlock::ResourceLink(resource) => {
+                    if let Some(mention_uri) = MentionUri::parse(&resource.uri).log_err() {
+                        let start = text.len();
+                        write!(&mut text, "{}", mention_uri.as_link()).ok();
+                        let end = text.len();
+                        mentions.push((start..end, mention_uri, resource.uri));
+                    }
+                }
                 acp::ContentBlock::Image(content) => {
                     let start = text.len();
                     text.push_str("image");
                     let end = text.len();
                     images.push((start..end, content));
                 }
-                acp::ContentBlock::Audio(_)
-                | acp::ContentBlock::Resource(_)
-                | acp::ContentBlock::ResourceLink(_) => {}
+                acp::ContentBlock::Audio(_) | acp::ContentBlock::Resource(_) => {}
             }
         }
 
@@ -1418,6 +1433,7 @@ pub enum Mention {
         tracked_buffers: Vec<Entity<Buffer>>,
     },
     Image(MentionImage),
+    UriOnly(MentionUri),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1466,24 +1482,24 @@ impl MentionSet {
         self.text_thread_summaries.insert(path, task);
     }
 
-    pub fn drain(&mut self) -> impl Iterator<Item = CreaseId> {
-        self.fetch_results.clear();
-        self.thread_summaries.clear();
-        self.text_thread_summaries.clear();
-        self.directories.clear();
-        self.uri_by_crease_id
-            .drain()
-            .map(|(id, _)| id)
-            .chain(self.images.drain().map(|(id, _)| id))
-    }
-
     pub fn contents(
         &self,
         project: &Entity<Project>,
         prompt_store: Option<&Entity<PromptStore>>,
+        prompt_capabilities: &acp::PromptCapabilities,
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<HashMap<CreaseId, Mention>>> {
+        if !prompt_capabilities.embedded_context {
+            let mentions = self
+                .uri_by_crease_id
+                .iter()
+                .map(|(crease_id, uri)| (*crease_id, Mention::UriOnly(uri.clone())))
+                .collect();
+
+            return Task::ready(Ok(mentions));
+        }
+
         let mut processed_image_creases = HashSet::default();
 
         let mut contents = self
@@ -1676,6 +1692,25 @@ impl MentionSet {
             anyhow::Ok(contents)
         })
     }
+
+    pub fn drain(&mut self) -> impl Iterator<Item = CreaseId> {
+        self.fetch_results.clear();
+        self.thread_summaries.clear();
+        self.text_thread_summaries.clear();
+        self.directories.clear();
+        self.uri_by_crease_id
+            .drain()
+            .map(|(id, _)| id)
+            .chain(self.images.drain().map(|(id, _)| id))
+    }
+
+    pub fn remove_invalid(&mut self, snapshot: EditorSnapshot) {
+        for (crease_id, crease) in snapshot.crease_snapshot.creases() {
+            if !crease.range().start.is_valid(&snapshot.buffer_snapshot) {
+                self.uri_by_crease_id.remove(&crease_id);
+            }
+        }
+    }
 }
 
 struct SlashCommandSemanticsProvider {
@@ -1817,7 +1852,7 @@ impl Addon for MessageEditorAddon {
 
 #[cfg(test)]
 mod tests {
-    use std::{ops::Range, path::Path, sync::Arc};
+    use std::{cell::Cell, ops::Range, path::Path, rc::Rc, sync::Arc};
 
     use acp_thread::MentionUri;
     use agent_client_protocol as acp;
@@ -1863,6 +1898,7 @@ mod tests {
                     project.clone(),
                     history_store.clone(),
                     None,
+                    Default::default(),
                     "Test",
                     false,
                     EditorMode::AutoHeight {
@@ -2053,6 +2089,7 @@ mod tests {
 
         let context_store = cx.new(|cx| ContextStore::fake(project.clone(), cx));
         let history_store = cx.new(|cx| HistoryStore::new(context_store, cx));
+        let prompt_capabilities = Rc::new(Cell::new(acp::PromptCapabilities::default()));
 
         let (message_editor, editor) = workspace.update_in(&mut cx, |workspace, window, cx| {
             let workspace_handle = cx.weak_entity();
@@ -2062,6 +2099,7 @@ mod tests {
                     project.clone(),
                     history_store.clone(),
                     None,
+                    prompt_capabilities.clone(),
                     "Test",
                     false,
                     EditorMode::AutoHeight {
@@ -2106,13 +2144,10 @@ mod tests {
             editor.set_text("", window, cx);
         });
 
-        message_editor.update(&mut cx, |editor, _cx| {
-            // Enable all prompt capabilities
-            editor.set_prompt_capabilities(acp::PromptCapabilities {
-                image: true,
-                audio: true,
-                embedded_context: true,
-            });
+        prompt_capabilities.set(acp::PromptCapabilities {
+            image: true,
+            audio: true,
+            embedded_context: true,
         });
 
         cx.simulate_input("Lorem ");
@@ -2180,11 +2215,21 @@ mod tests {
             assert_eq!(fold_ranges(editor, cx).len(), 1);
         });
 
+        let all_prompt_capabilities = acp::PromptCapabilities {
+            image: true,
+            audio: true,
+            embedded_context: true,
+        };
+
         let contents = message_editor
             .update_in(&mut cx, |message_editor, window, cx| {
-                message_editor
-                    .mention_set()
-                    .contents(&project, None, window, cx)
+                message_editor.mention_set().contents(
+                    &project,
+                    None,
+                    &all_prompt_capabilities,
+                    window,
+                    cx,
+                )
             })
             .await
             .unwrap()
@@ -2196,6 +2241,28 @@ mod tests {
                 panic!("Unexpected mentions");
             };
             pretty_assertions::assert_eq!(content, "1");
+            pretty_assertions::assert_eq!(uri, &url_one.parse::<MentionUri>().unwrap());
+        }
+
+        let contents = message_editor
+            .update_in(&mut cx, |message_editor, window, cx| {
+                message_editor.mention_set().contents(
+                    &project,
+                    None,
+                    &acp::PromptCapabilities::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .into_values()
+            .collect::<Vec<_>>();
+
+        {
+            let [Mention::UriOnly(uri)] = contents.as_slice() else {
+                panic!("Unexpected mentions");
+            };
             pretty_assertions::assert_eq!(uri, &url_one.parse::<MentionUri>().unwrap());
         }
 
@@ -2234,9 +2301,13 @@ mod tests {
 
         let contents = message_editor
             .update_in(&mut cx, |message_editor, window, cx| {
-                message_editor
-                    .mention_set()
-                    .contents(&project, None, window, cx)
+                message_editor.mention_set().contents(
+                    &project,
+                    None,
+                    &all_prompt_capabilities,
+                    window,
+                    cx,
+                )
             })
             .await
             .unwrap()
@@ -2344,9 +2415,13 @@ mod tests {
 
         let contents = message_editor
             .update_in(&mut cx, |message_editor, window, cx| {
-                message_editor
-                    .mention_set()
-                    .contents(&project, None, window, cx)
+                message_editor.mention_set().contents(
+                    &project,
+                    None,
+                    &all_prompt_capabilities,
+                    window,
+                    cx,
+                )
             })
             .await
             .unwrap()
