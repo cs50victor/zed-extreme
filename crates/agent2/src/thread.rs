@@ -45,14 +45,15 @@ use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Serialize};
 use settings::{Settings, update_settings_file};
 use smol::stream::StreamExt;
+use std::fmt::Write;
 use std::{
     collections::BTreeMap,
+    ops::RangeInclusive,
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
-use std::{fmt::Write, ops::Range};
-use util::{ResultExt, markdown::MarkdownCodeBlock};
+use util::{ResultExt, debug_panic, markdown::MarkdownCodeBlock};
 use uuid::Uuid;
 
 const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
@@ -187,6 +188,7 @@ impl UserMessage {
         const OPEN_FILES_TAG: &str = "<files>";
         const OPEN_DIRECTORIES_TAG: &str = "<directories>";
         const OPEN_SYMBOLS_TAG: &str = "<symbols>";
+        const OPEN_SELECTIONS_TAG: &str = "<selections>";
         const OPEN_THREADS_TAG: &str = "<threads>";
         const OPEN_FETCH_TAG: &str = "<fetched_urls>";
         const OPEN_RULES_TAG: &str =
@@ -195,6 +197,7 @@ impl UserMessage {
         let mut file_context = OPEN_FILES_TAG.to_string();
         let mut directory_context = OPEN_DIRECTORIES_TAG.to_string();
         let mut symbol_context = OPEN_SYMBOLS_TAG.to_string();
+        let mut selection_context = OPEN_SELECTIONS_TAG.to_string();
         let mut thread_context = OPEN_THREADS_TAG.to_string();
         let mut fetch_context = OPEN_FETCH_TAG.to_string();
         let mut rules_context = OPEN_RULES_TAG.to_string();
@@ -211,7 +214,7 @@ impl UserMessage {
                     match uri {
                         MentionUri::File { abs_path } => {
                             write!(
-                                &mut symbol_context,
+                                &mut file_context,
                                 "\n{}",
                                 MarkdownCodeBlock {
                                     tag: &codeblock_tag(abs_path, None),
@@ -220,20 +223,40 @@ impl UserMessage {
                             )
                             .ok();
                         }
+                        MentionUri::PastedImage => {
+                            debug_panic!("pasted image URI should not be used in mention content")
+                        }
                         MentionUri::Directory { .. } => {
                             write!(&mut directory_context, "\n{}\n", content).ok();
                         }
                         MentionUri::Symbol {
-                            path, line_range, ..
-                        }
-                        | MentionUri::Selection {
-                            path, line_range, ..
+                            abs_path: path,
+                            line_range,
+                            ..
                         } => {
                             write!(
-                                &mut rules_context,
+                                &mut symbol_context,
                                 "\n{}",
                                 MarkdownCodeBlock {
                                     tag: &codeblock_tag(path, Some(line_range)),
+                                    text: content
+                                }
+                            )
+                            .ok();
+                        }
+                        MentionUri::Selection {
+                            abs_path: path,
+                            line_range,
+                            ..
+                        } => {
+                            write!(
+                                &mut selection_context,
+                                "\n{}",
+                                MarkdownCodeBlock {
+                                    tag: &codeblock_tag(
+                                        path.as_deref().unwrap_or("Untitled".as_ref()),
+                                        Some(line_range)
+                                    ),
                                     text: content
                                 }
                             )
@@ -291,6 +314,13 @@ impl UserMessage {
                 .push(language_model::MessageContent::Text(symbol_context));
         }
 
+        if selection_context.len() > OPEN_SELECTIONS_TAG.len() {
+            selection_context.push_str("</selections>\n");
+            message
+                .content
+                .push(language_model::MessageContent::Text(selection_context));
+        }
+
         if thread_context.len() > OPEN_THREADS_TAG.len() {
             thread_context.push_str("</threads>\n");
             message
@@ -326,7 +356,7 @@ impl UserMessage {
     }
 }
 
-fn codeblock_tag(full_path: &Path, line_range: Option<&Range<u32>>) -> String {
+fn codeblock_tag(full_path: &Path, line_range: Option<&RangeInclusive<u32>>) -> String {
     let mut result = String::new();
 
     if let Some(extension) = full_path.extension().and_then(|ext| ext.to_str()) {
@@ -336,10 +366,10 @@ fn codeblock_tag(full_path: &Path, line_range: Option<&Range<u32>>) -> String {
     let _ = write!(result, "{}", full_path.display());
 
     if let Some(range) = line_range {
-        if range.start == range.end {
-            let _ = write!(result, ":{}", range.start + 1);
+        if range.start() == range.end() {
+            let _ = write!(result, ":{}", range.start() + 1);
         } else {
-            let _ = write!(result, ":{}-{}", range.start + 1, range.end + 1);
+            let _ = write!(result, ":{}-{}", range.start() + 1, range.end() + 1);
         }
     }
 
@@ -418,24 +448,33 @@ impl AgentMessage {
             cache: false,
         };
         for chunk in &self.content {
-            let chunk = match chunk {
+            match chunk {
                 AgentMessageContent::Text(text) => {
-                    language_model::MessageContent::Text(text.clone())
+                    assistant_message
+                        .content
+                        .push(language_model::MessageContent::Text(text.clone()));
                 }
                 AgentMessageContent::Thinking { text, signature } => {
-                    language_model::MessageContent::Thinking {
-                        text: text.clone(),
-                        signature: signature.clone(),
-                    }
+                    assistant_message
+                        .content
+                        .push(language_model::MessageContent::Thinking {
+                            text: text.clone(),
+                            signature: signature.clone(),
+                        });
                 }
                 AgentMessageContent::RedactedThinking(value) => {
-                    language_model::MessageContent::RedactedThinking(value.clone())
+                    assistant_message.content.push(
+                        language_model::MessageContent::RedactedThinking(value.clone()),
+                    );
                 }
-                AgentMessageContent::ToolUse(value) => {
-                    language_model::MessageContent::ToolUse(value.clone())
+                AgentMessageContent::ToolUse(tool_use) => {
+                    if self.tool_results.contains_key(&tool_use.id) {
+                        assistant_message
+                            .content
+                            .push(language_model::MessageContent::ToolUse(tool_use.clone()));
+                    }
                 }
             };
-            assistant_message.content.push(chunk);
         }
 
         let mut user_message = LanguageModelRequestMessage {
@@ -1285,23 +1324,6 @@ impl Thread {
         }
     }
 
-    pub fn build_system_message(&self, cx: &App) -> LanguageModelRequestMessage {
-        log::debug!("Building system message");
-        let prompt = SystemPromptTemplate {
-            project: self.project_context.read(cx),
-            available_tools: self.tools.keys().cloned().collect(),
-        }
-        .render(&self.templates)
-        .context("failed to build system prompt")
-        .expect("Invalid template");
-        log::debug!("System message built");
-        LanguageModelRequestMessage {
-            role: Role::System,
-            content: vec![prompt.into()],
-            cache: true,
-        }
-    }
-
     /// A helper method that's called on every streamed completion event.
     /// Returns an optional tool result task, which the main agentic loop will
     /// send back to the model when it resolves.
@@ -1743,7 +1765,7 @@ impl Thread {
     pub(crate) fn build_completion_request(
         &self,
         completion_intent: CompletionIntent,
-        cx: &mut App,
+        cx: &App,
     ) -> Result<LanguageModelRequest> {
         let model = self.model().context("No language model configured")?;
         let tools = if let Some(turn) = self.running_turn.as_ref() {
@@ -1864,21 +1886,29 @@ impl Thread {
             "Building request messages from {} thread messages",
             self.messages.len()
         );
-        let mut messages = vec![self.build_system_message(cx)];
+
+        let system_prompt = SystemPromptTemplate {
+            project: self.project_context.read(cx),
+            available_tools: self.tools.keys().cloned().collect(),
+        }
+        .render(&self.templates)
+        .context("failed to build system prompt")
+        .expect("Invalid template");
+        let mut messages = vec![LanguageModelRequestMessage {
+            role: Role::System,
+            content: vec![system_prompt.into()],
+            cache: false,
+        }];
         for message in &self.messages {
             messages.extend(message.to_request());
         }
 
-        if let Some(message) = self.pending_message.as_ref() {
-            messages.extend(message.to_request());
+        if let Some(last_message) = messages.last_mut() {
+            last_message.cache = true;
         }
 
-        if let Some(last_user_message) = messages
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == Role::User)
-        {
-            last_user_message.cache = true;
+        if let Some(message) = self.pending_message.as_ref() {
+            messages.extend(message.to_request());
         }
 
         messages
