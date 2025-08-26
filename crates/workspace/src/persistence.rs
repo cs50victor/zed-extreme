@@ -553,7 +553,7 @@ impl Domain for WorkspaceDb {
                             WHEN workspaces.local_paths_array IS NULL OR workspaces.local_paths_array = "" THEN
                                 NULL
                             ELSE
-                                replace(workspaces.local_paths_array, ',', "\n")
+                                replace(workspaces.local_paths_array, ',', CHAR(10))
                         END
                 END as paths,
 
@@ -598,6 +598,13 @@ impl Domain for WorkspaceDb {
                 workspaces LEFT JOIN
                 ssh_projects ON
                 workspaces.ssh_project_id = ssh_projects.id;
+
+            DELETE FROM workspaces_2
+            WHERE workspace_id NOT IN (
+                SELECT MAX(workspace_id)
+                FROM workspaces_2
+                GROUP BY ssh_connection_id, paths
+            );
 
             DROP TABLE ssh_projects;
             DROP TABLE workspaces;
